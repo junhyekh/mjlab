@@ -332,6 +332,52 @@ def test_reward_scaling_default_is_enabled(mock_env):
   assert torch.allclose(rewards, torch.full((4,), 0.01))
 
 
+def test_reward_manager_logs_raw_and_cumulative_episode_stats(mock_env):
+  """RewardManager logs weighted sums plus raw mean/sum episode stats."""
+  mock_env.max_episode_length_s = 1.0
+  cfg = {
+    "term": RewardTermCfg(
+      func=lambda env: torch.ones(env.num_envs, device=env.device) * 2.0,
+      weight=3.0,
+      params={},
+    )
+  }
+  manager = RewardManager(cfg, mock_env)
+
+  for _ in range(5):
+    manager.compute(dt=0.2)
+
+  info = manager.reset(env_ids=torch.tensor([0, 1]))
+
+  assert info["Episode_Reward/term"].item() == pytest.approx(6.0)
+  assert info["Episode_RewardSum/term"].item() == pytest.approx(6.0)
+  assert info["Episode_RawRewardMean/term"].item() == pytest.approx(2.0)
+  assert info["Episode_RawRewardSum/term"].item() == pytest.approx(10.0)
+
+
+def test_reward_manager_logs_raw_values_for_zero_weight_terms(mock_env):
+  """Zero-weight terms still record raw episode stats for debugging/logging."""
+  mock_env.max_episode_length_s = 1.0
+  cfg = {
+    "term": RewardTermCfg(
+      func=lambda env: torch.ones(env.num_envs, device=env.device) * 4.0,
+      weight=0.0,
+      params={},
+    )
+  }
+  manager = RewardManager(cfg, mock_env)
+
+  rewards = manager.compute(dt=0.5)
+  rewards += manager.compute(dt=0.5)
+  info = manager.reset(env_ids=torch.tensor([0, 1]))
+
+  assert torch.allclose(rewards, torch.zeros_like(rewards))
+  assert info["Episode_Reward/term"].item() == 0.0
+  assert info["Episode_RewardSum/term"].item() == 0.0
+  assert info["Episode_RawRewardMean/term"].item() == pytest.approx(4.0)
+  assert info["Episode_RawRewardSum/term"].item() == pytest.approx(8.0)
+
+
 def test_joint_torques_l2_with_actuator_ids(mock_env):
   """Test that joint_torques_l2 only penalizes specified actuators."""
   mock_env.scene["robot"].data.actuator_force = torch.tensor([[1.0, 2.0, 3.0, 4.0]] * 4)
