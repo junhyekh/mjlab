@@ -39,6 +39,7 @@ class RewardManager(ManagerBase):
       - ``reward_buf`` (returned by ``compute()``) = raw_value * weight * dt
       - ``_episode_sums`` (cumulative rewards) are scaled by dt
       - ``Episode_Reward/*`` logged metrics are scaled by dt
+      - ``Episode_RewardSum/*`` logged metrics are scaled by dt
 
     When ``scale_by_dt=False``:
       - ``reward_buf`` = raw_value * weight (no dt scaling)
@@ -46,6 +47,8 @@ class RewardManager(ManagerBase):
     Regardless of the scaling setting:
       - ``_step_reward`` (via ``get_active_iterable_terms()``) always contains
         the unscaled reward rate (raw_value * weight)
+      - ``Episode_RawRewardMean/*`` logs the per-step mean raw term value
+      - ``Episode_RawRewardSum/*`` logs the cumulative raw term value
   """
 
   _env: ManagerBasedRlEnv
@@ -65,10 +68,17 @@ class RewardManager(ManagerBase):
     self.cfg = deepcopy(cfg)
     super().__init__(env=env)
     self._episode_sums = dict()
+    self._episode_raw_sums = dict()
     for term_name in self._term_names:
       self._episode_sums[term_name] = torch.zeros(
         self.num_envs, dtype=torch.float, device=self.device
       )
+      self._episode_raw_sums[term_name] = torch.zeros(
+        self.num_envs, dtype=torch.float, device=self.device
+      )
+    self._episode_step_counts = torch.zeros(
+      self.num_envs, dtype=torch.long, device=self.device
+    )
     self._reward_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
     self._step_reward = torch.zeros(
       (self.num_envs, len(self._term_names)), dtype=torch.float, device=self.device
@@ -103,32 +113,40 @@ class RewardManager(ManagerBase):
     if env_ids is None:
       env_ids = slice(None)
     extras = {}
+    counts = self._episode_step_counts[env_ids].float()
+    safe_counts = torch.clamp(counts, min=1.0)
     for key in self._episode_sums.keys():
       episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
+      raw_sum_avg = torch.mean(self._episode_raw_sums[key][env_ids])
+      raw_mean_avg = torch.mean(self._episode_raw_sums[key][env_ids] / safe_counts)
       extras["Episode_Reward/" + key] = (
         episodic_sum_avg / self._env.max_episode_length_s
       )
+      extras["Episode_RewardSum/" + key] = episodic_sum_avg
+      extras["Episode_RawRewardMean/" + key] = raw_mean_avg
+      extras["Episode_RawRewardSum/" + key] = raw_sum_avg
       self._episode_sums[key][env_ids] = 0.0
+      self._episode_raw_sums[key][env_ids] = 0.0
+    self._episode_step_counts[env_ids] = 0
     for term_cfg in self._class_term_cfgs:
       term_cfg.func.reset(env_ids=env_ids)
     return extras
 
   def compute(self, dt: float) -> torch.Tensor:
     self._reward_buf[:] = 0.0
+    self._episode_step_counts += 1
     scale = dt if self._scale_by_dt else 1.0
     for term_idx, (name, term_cfg) in enumerate(
       zip(self._term_names, self._term_cfgs, strict=False)
     ):
-      if term_cfg.weight == 0.0:
-        self._step_reward[:, term_idx] = 0.0
-        continue
-      value = term_cfg.func(self._env, **term_cfg.params)
-      self._check_term_shape(name, value)
-      value = value * term_cfg.weight * scale
+      raw_value = term_cfg.func(self._env, **term_cfg.params)
+      self._check_term_shape(name, raw_value)
       # NaN/Inf can occur from corrupted physics state; zero them to avoid policy crash.
-      value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+      raw_value = torch.nan_to_num(raw_value, nan=0.0, posinf=0.0, neginf=0.0)
+      value = raw_value * term_cfg.weight * scale
       self._reward_buf += value
       self._episode_sums[name] += value
+      self._episode_raw_sums[name] += raw_value
       self._step_reward[:, term_idx] = value / scale
     return self._reward_buf
 
