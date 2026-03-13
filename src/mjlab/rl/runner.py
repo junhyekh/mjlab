@@ -29,6 +29,50 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
         if train_cfg[key].get("rnn_type") is None:
           for opt in ("rnn_type", "rnn_hidden_dim", "rnn_num_layers"):
             train_cfg[key].pop(opt, None)
+
+    mc_cfg = train_cfg.get("multi_critic")
+    if mc_cfg is not None and mc_cfg.get("enabled", False):
+      reward_terms = list(env.unwrapped.reward_manager.active_terms)
+      reward_term_to_index = {name: idx for idx, name in enumerate(reward_terms)}
+      groups = mc_cfg.get("groups", [])
+      if not groups:
+        raise ValueError("multi_critic.enabled=True requires at least one critic group.")
+
+      reward_group_indices: list[list[int]] = []
+      critic_weights: list[float] = []
+      assigned_terms: dict[str, str] = {}
+      for group in groups:
+        group_name = group.get("name", "")
+        group_reward_terms = group.get("reward_terms", [])
+        if not group_reward_terms:
+          raise ValueError(f"Critic group '{group_name}' must contain at least one reward term.")
+        reward_indices: list[int] = []
+        for reward_term in group_reward_terms:
+          if reward_term not in reward_term_to_index:
+            raise ValueError(
+              f"Unknown reward term '{reward_term}' in critic group '{group_name}'. "
+              f"Available terms: {reward_terms}"
+            )
+          if reward_term in assigned_terms:
+            raise ValueError(
+              f"Reward term '{reward_term}' is assigned to multiple critic groups: "
+              f"'{assigned_terms[reward_term]}' and '{group_name}'."
+            )
+          assigned_terms[reward_term] = group_name
+          reward_indices.append(reward_term_to_index[reward_term])
+        reward_group_indices.append(reward_indices)
+        critic_weights.append(group.get("weight", 1.0))
+
+      unassigned_terms = [term for term in reward_terms if term not in assigned_terms]
+      if unassigned_terms:
+        raise ValueError(
+          "Every active reward term must be assigned to exactly one critic group. "
+          f"Unassigned terms: {unassigned_terms}"
+        )
+
+      mc_cfg["num_critics"] = len(reward_group_indices)
+      mc_cfg["reward_group_indices"] = reward_group_indices
+      mc_cfg["critic_weights"] = critic_weights
     super().__init__(env, train_cfg, log_dir, device)
 
   def export_policy_to_onnx(

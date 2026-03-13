@@ -82,6 +82,26 @@ class RslRlPpoAlgorithmCfg:
 
 
 @dataclass
+class CriticGroupCfg:
+  """Config for a multi-critic reward group."""
+
+  name: str = ""
+  reward_terms: Tuple[str, ...] = ()
+  weight: float = 1.0
+
+
+@dataclass
+class MultiCriticCfg:
+  """Config for multi-critic PPO."""
+
+  enabled: bool = False
+  groups: Tuple[CriticGroupCfg, ...] = ()
+  trunk_hidden_dims: Tuple[int, ...] = (256, 256)
+  head_hidden_dims: Tuple[int, ...] = (128, 64)
+  advantage_normalization: Literal["independent", "magnitude_preserved"] = "independent"
+
+
+@dataclass
 class RslRlBaseRunnerCfg:
   seed: int = 42
   """The seed for the experiment. Default is 42."""
@@ -143,3 +163,5 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
   """The critic configuration."""
   algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoAlgorithmCfg)
   """The algorithm configuration."""
+  multi_critic: MultiCriticCfg = field(default_factory=MultiCriticCfg)
+  """The multi-critic PPO configuration."""
