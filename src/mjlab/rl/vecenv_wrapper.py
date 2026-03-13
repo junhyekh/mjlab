@@ -79,6 +79,12 @@ class RslRlVecEnvWrapper(VecEnv):
     assert isinstance(rew, torch.Tensor)
     assert isinstance(term_or_trunc, torch.Tensor)
     dones = term_or_trunc.to(dtype=torch.long)
+    reward_mgr = self.unwrapped.reward_manager
+    per_term_rewards = reward_mgr._step_reward.clone()
+    if reward_mgr._scale_by_dt:
+      per_term_rewards = per_term_rewards * self.unwrapped.step_dt
+    extras["per_term_rewards"] = per_term_rewards
+    extras["reward_term_names"] = list(reward_mgr.active_terms)
     if not self.cfg.is_finite_horizon:
       extras["time_outs"] = truncated
     return (

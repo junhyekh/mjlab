@@ -16,6 +16,7 @@ from mjlab.actuator import XmlMotorActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg, mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.rl.spatial_softmax import SpatialSoftmaxCNNModel
@@ -84,6 +85,10 @@ def env(device):
         entity_name="robot", actuator_names=(".*",), scale=1.0
       )
     },
+    rewards={
+      "alive": RewardTermCfg(func=lambda env: torch.ones(env.num_envs, device=env.device), weight=1.0),
+      "effort": RewardTermCfg(func=lambda env: torch.full((env.num_envs,), 2.0, device=env.device), weight=1.0),
+    },
     sim=SimulationCfg(mujoco=MujocoCfg(timestep=0.01, iterations=1)),
     decimation=1,
     episode_length_s=1.0,
@@ -145,6 +150,42 @@ def test_runner_handles_old_checkpoints_without_env_state(env, device):
     runner.load(checkpoint_path)
 
     assert wrapped_env.unwrapped.common_step_counter == 999
+
+
+def test_vecenv_wrapper_exposes_per_term_rewards(env):
+  """RslRlVecEnvWrapper.step() should expose per-term rewards on the same scale as scalar reward."""
+  wrapped_env = RslRlVecEnvWrapper(env)
+
+  _obs, rew, _dones, extras = wrapped_env.step(torch.zeros(env.num_envs, wrapped_env.num_actions, device=env.device))
+
+  assert "per_term_rewards" in extras
+  assert "reward_term_names" in extras
+  torch.testing.assert_close(extras["per_term_rewards"].sum(dim=-1), rew)
+  assert extras["reward_term_names"] == ["alive", "effort"]
+
+
+def test_runner_validates_multi_critic_reward_terms(env, device):
+  """MjlabOnPolicyRunner should fail fast on unknown critic-group reward terms."""
+  wrapped_env = RslRlVecEnvWrapper(env)
+  agent_cfg = RslRlOnPolicyRunnerCfg(
+    num_steps_per_env=4,
+    max_iterations=10,
+    save_interval=5,
+  )
+  train_cfg = asdict(agent_cfg)
+  train_cfg["multi_critic"] = {
+    "enabled": True,
+    "groups": (
+      {"name": "tracking", "reward_terms": ("alive",), "weight": 1.0},
+      {"name": "bad", "reward_terms": ("missing_term",), "weight": 1.0},
+    ),
+    "trunk_hidden_dims": (32, 16),
+    "head_hidden_dims": (8,),
+    "advantage_normalization": "independent",
+  }
+
+  with pytest.raises(ValueError, match="Unknown reward term"):
+    MjlabOnPolicyRunner(wrapped_env, train_cfg, device=device)
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
