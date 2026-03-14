@@ -31,8 +31,7 @@ def device():
   return get_test_device()
 
 
-@pytest.fixture
-def env(device):
+def _make_env_cfg(*, scale_rewards_by_dt: bool = True) -> ManagerBasedRlEnvCfg:
   robot_xml = """
   <mujoco>
     <worldbody>
@@ -57,7 +56,7 @@ def env(device):
     ),
   )
 
-  env_cfg = ManagerBasedRlEnvCfg(
+  return ManagerBasedRlEnvCfg(
     scene=SceneCfg(
       terrain=TerrainEntityCfg(terrain_type="plane"),
       num_envs=2,
@@ -92,9 +91,20 @@ def env(device):
     sim=SimulationCfg(mujoco=MujocoCfg(timestep=0.01, iterations=1)),
     decimation=1,
     episode_length_s=1.0,
+    scale_rewards_by_dt=scale_rewards_by_dt,
   )
 
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+
+@pytest.fixture
+def env(device):
+  env = ManagerBasedRlEnv(cfg=_make_env_cfg(), device=device)
+  yield env
+  env.close()
+
+
+@pytest.fixture
+def env_no_reward_dt(device):
+  env = ManagerBasedRlEnv(cfg=_make_env_cfg(scale_rewards_by_dt=False), device=device)
   yield env
   env.close()
 
@@ -153,15 +163,58 @@ def test_runner_handles_old_checkpoints_without_env_state(env, device):
 
 
 def test_vecenv_wrapper_exposes_per_term_rewards(env):
-  """RslRlVecEnvWrapper.step() should expose per-term rewards on the same scale as scalar reward."""
+  """RslRlVecEnvWrapper.step() should expose raw per-term rewards without per-step allocations."""
   wrapped_env = RslRlVecEnvWrapper(env)
 
   _obs, rew, _dones, extras = wrapped_env.step(torch.zeros(env.num_envs, wrapped_env.num_actions, device=env.device))
 
   assert "per_term_rewards" in extras
-  assert "reward_term_names" in extras
-  torch.testing.assert_close(extras["per_term_rewards"].sum(dim=-1), rew)
-  assert extras["reward_term_names"] == ["alive", "effort"]
+  assert "reward_term_names" not in extras
+  torch.testing.assert_close(extras["per_term_rewards"].sum(dim=-1) * env.step_dt, rew)
+
+
+def test_runner_injects_multi_critic_reward_scale(env, device):
+  """Multi-critic runner config should carry the reward scaling factor into PPO."""
+  wrapped_env = RslRlVecEnvWrapper(env)
+  agent_cfg = RslRlOnPolicyRunnerCfg(num_steps_per_env=4, max_iterations=10, save_interval=5)
+  train_cfg = asdict(agent_cfg)
+  train_cfg["multi_critic"] = {
+    "enabled": True,
+    "groups": (
+      {"name": "task", "reward_terms": ("alive",), "weight": 1.0},
+      {"name": "cost", "reward_terms": ("effort",), "weight": 1.0},
+    ),
+    "trunk_hidden_dims": (32, 16),
+    "head_hidden_dims": (8,),
+    "advantage_normalization": "magnitude_preserved",
+  }
+
+  runner = MjlabOnPolicyRunner(wrapped_env, train_cfg, device=device)
+
+  assert runner.cfg["multi_critic"]["reward_scale"] == pytest.approx(env.step_dt)
+  assert runner.alg.reward_scale == pytest.approx(env.step_dt)
+
+
+def test_runner_injects_multi_critic_reward_scale_without_dt(env_no_reward_dt, device):
+  """Reward scaling should be 1.0 when the environment disables dt normalization."""
+  wrapped_env = RslRlVecEnvWrapper(env_no_reward_dt)
+  agent_cfg = RslRlOnPolicyRunnerCfg(num_steps_per_env=4, max_iterations=10, save_interval=5)
+  train_cfg = asdict(agent_cfg)
+  train_cfg["multi_critic"] = {
+    "enabled": True,
+    "groups": (
+      {"name": "task", "reward_terms": ("alive",), "weight": 1.0},
+      {"name": "cost", "reward_terms": ("effort",), "weight": 1.0},
+    ),
+    "trunk_hidden_dims": (32, 16),
+    "head_hidden_dims": (8,),
+    "advantage_normalization": "magnitude_preserved",
+  }
+
+  runner = MjlabOnPolicyRunner(wrapped_env, train_cfg, device=device)
+
+  assert runner.cfg["multi_critic"]["reward_scale"] == pytest.approx(1.0)
+  assert runner.alg.reward_scale == pytest.approx(1.0)
 
 
 def test_runner_validates_multi_critic_reward_terms(env, device):

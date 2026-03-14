@@ -68,6 +68,7 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
       mc_cfg["num_critics"] = len(reward_group_indices)
       mc_cfg["reward_group_indices"] = reward_group_indices
       mc_cfg["critic_weights"] = critic_weights
+      mc_cfg["reward_scale"] = env.unwrapped.step_dt if env.unwrapped.reward_manager._scale_by_dt else 1.0
     super().__init__(env, train_cfg, log_dir, device)
 
   def export_policy_to_onnx(
