@@ -109,6 +109,61 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
     filename = f"{export_dir.name}.onnx"
     return export_dir, filename, export_dir / filename
 
+  def _collect_manager_term_states(self) -> dict:
+    env = self.env.unwrapped
+    state = {}
+
+    command_manager = getattr(env, "command_manager", None)
+    command_states = {}
+    if command_manager is not None:
+      for name in getattr(command_manager, "active_terms", []):
+        term = command_manager.get_term(name)
+        if hasattr(term, "get_checkpoint_state"):
+          command_states[name] = term.get_checkpoint_state()
+    if command_states:
+      state["commands"] = command_states
+
+    event_manager = getattr(env, "event_manager", None)
+    event_states = {}
+    if event_manager is not None:
+      active_terms = getattr(event_manager, "active_terms", {})
+      if isinstance(active_terms, dict):
+        for term_names in active_terms.values():
+          for name in term_names:
+            term = event_manager.get_term_cfg(name).func
+            if hasattr(term, "get_checkpoint_state"):
+              event_states[name] = term.get_checkpoint_state()
+    if event_states:
+      state["events"] = event_states
+
+    return state
+
+  def _load_manager_term_states(self, env_state: dict) -> None:
+    env = self.env.unwrapped
+
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is not None:
+      for name, state in env_state.get("commands", {}).items():
+        if name not in getattr(command_manager, "active_terms", []):
+          continue
+        term = command_manager.get_term(name)
+        if hasattr(term, "load_checkpoint_state"):
+          term.load_checkpoint_state(state)
+
+    event_manager = getattr(env, "event_manager", None)
+    if event_manager is not None:
+      active_terms = getattr(event_manager, "active_terms", {})
+      if isinstance(active_terms, dict):
+        active_names = {name for names in active_terms.values() for name in names}
+      else:
+        active_names = set()
+      for name, state in env_state.get("events", {}).items():
+        if name not in active_names:
+          continue
+        term = event_manager.get_term_cfg(name).func
+        if hasattr(term, "load_checkpoint_state"):
+          term.load_checkpoint_state(state)
+
   def save(self, path: str, infos=None) -> None:
     """Save checkpoint.
 
@@ -116,6 +171,7 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
     common_step_counter and to respect the ``upload_model`` config flag.
     """
     env_state = {"common_step_counter": self.env.unwrapped.common_step_counter}
+    env_state.update(self._collect_manager_term_states())
     infos = {**(infos or {}), "env_state": env_state}
     # Inline base OnPolicyRunner.save() to conditionally gate W&B upload.
     saved_dict = self.alg.save()
@@ -182,5 +238,7 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
 
     infos = loaded_dict["infos"]
     if infos and "env_state" in infos:
-      self.env.unwrapped.common_step_counter = infos["env_state"]["common_step_counter"]
+      env_state = infos["env_state"]
+      self.env.unwrapped.common_step_counter = env_state["common_step_counter"]
+      self._load_manager_term_states(env_state)
     return infos
